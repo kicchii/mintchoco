@@ -1,0 +1,8 @@
+{
+  "name": "kicchive — Perpustakaan Digital",
+  "description": "Aplikasi perpustakaan digital kicchive untuk peminjaman buku daring, pembacaan PDF di dalam aplikasi, unggah PDF oleh admin, dan notifikasi pengingat pengembalian buku terlambat.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

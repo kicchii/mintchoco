@@ -1,0 +1,171 @@
+{
+  "entities": {
+    "AdminUser": {
+      "title": "AdminUser",
+      "description": "Administrator registry for kicchive digital library management.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "format": "email", "minLength": 3, "maxLength": 200 },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "displayName", "createdAt"]
+    },
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Member or administrator profile with role metadata.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "email": { "type": "string", "format": "email", "minLength": 3, "maxLength": 200 },
+        "role": { "type": "string", "enum": ["member", "admin"], "maxLength": 20 },
+        "photoURL": { "type": "string", "maxLength": 500 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "displayName", "email", "role", "createdAt", "updatedAt"]
+    },
+    "Book": {
+      "title": "Book",
+      "description": "Digital book catalog item with PDF source and copy availability.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "author": { "type": "string", "minLength": 1, "maxLength": 150 },
+        "category": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "isbn": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "accessionNumber": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "publishedYear": { "type": "integer" },
+        "pageCount": { "type": "integer" },
+        "synopsis": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "coverUrl": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "pdfUrl": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "fileName": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "fileSizeBytes": { "type": "integer" },
+        "totalCopies": { "type": "integer" },
+        "availableCopies": { "type": "integer" },
+        "loanDurationDays": { "type": "integer" },
+        "createdBy": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "id",
+        "title",
+        "author",
+        "category",
+        "isbn",
+        "accessionNumber",
+        "publishedYear",
+        "pageCount",
+        "synopsis",
+        "coverUrl",
+        "pdfUrl",
+        "fileName",
+        "fileSizeBytes",
+        "totalCopies",
+        "availableCopies",
+        "loanDurationDays",
+        "createdBy",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "Loan": {
+      "title": "Loan",
+      "description": "Book borrowing transaction and reading progress record.",
+      "type": "object",
+      "properties": {
+        "bookId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "bookTitle": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "bookAuthor": { "type": "string", "minLength": 1, "maxLength": 150 },
+        "bookCoverUrl": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "pdfUrl": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "userId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "userName": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "userEmail": { "type": "string", "format": "email", "minLength": 3, "maxLength": 200 },
+        "status": { "type": "string", "enum": ["borrowed", "returned"], "maxLength": 20 },
+        "borrowedAt": { "type": "string", "format": "date-time" },
+        "dueAt": { "type": "string", "format": "date-time" },
+        "returnedAt": { "type": "string", "format": "date-time" },
+        "lastReadPage": { "type": "integer" },
+        "totalPages": { "type": "integer" },
+        "overdueNotified": { "type": "boolean" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "bookId",
+        "bookTitle",
+        "bookAuthor",
+        "bookCoverUrl",
+        "pdfUrl",
+        "userId",
+        "userName",
+        "userEmail",
+        "status",
+        "borrowedAt",
+        "dueAt",
+        "lastReadPage",
+        "totalPages",
+        "overdueNotified",
+        "updatedAt"
+      ]
+    },
+    "Notification": {
+      "title": "Notification",
+      "description": "Overdue and due-soon return reminder notifications for borrowers.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "loanId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "bookId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "bookTitle": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "type": { "type": "string", "enum": ["overdue", "due_soon", "admin_reminder", "returned"], "maxLength": 30 },
+        "title": { "type": "string", "minLength": 1, "maxLength": 150 },
+        "message": { "type": "string", "minLength": 1, "maxLength": 600 },
+        "daysOverdue": { "type": "integer" },
+        "isRead": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "userId",
+        "loanId",
+        "bookId",
+        "bookTitle",
+        "type",
+        "title",
+        "message",
+        "daysOverdue",
+        "isRead",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/admins/{adminId}": {
+      "schema": { "$ref": "#/entities/AdminUser" },
+      "description": "Authorized library administrator identities."
+    },
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Library member and administrator profiles with PII isolated to owner and admin."
+    },
+    "/books/{bookId}": {
+      "schema": { "$ref": "#/entities/Book" },
+      "description": "Digital library book catalog entries with PDF source metadata and copy counts."
+    },
+    "/loans/{loanId}": {
+      "schema": { "$ref": "#/entities/Loan" },
+      "description": "Active and returned online book loans with reading progress and due dates."
+    },
+    "/notifications/{notificationId}": {
+      "schema": { "$ref": "#/entities/Notification" },
+      "description": "Overdue return alerts and library reminder notifications per borrower."
+    }
+  }
+}
