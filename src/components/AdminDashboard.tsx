@@ -27,8 +27,10 @@ import type { Book, Loan, UploadedPdfResult } from '../types/library';
 
 interface AdminDashboardProps {
   adminUid: string;
+  customToken?: string | null;
   books: Book[];
   loans: Loan[];
+  onDataMutated?: () => Promise<void>;
   onPreviewPdf: (book: Book) => void;
   onStatusMessage: (msg: string, isError?: boolean) => void;
 }
@@ -39,8 +41,10 @@ const CATEGORIES = ['Arsitektur', 'Ekologi', 'Desain', 'Filsafat', 'Sejarah', 'S
 
 export function AdminDashboard({
   adminUid,
+  customToken,
   books,
   loans,
+  onDataMutated,
   onPreviewPdf,
   onStatusMessage,
 }: AdminDashboardProps) {
@@ -79,7 +83,7 @@ export function AdminDashboard({
 
     setUploadingPdf(true);
     try {
-      const result = await uploadPdfFile(file);
+      const result = await uploadPdfFile(file, customToken);
       setUploadedPdf(result);
       setPageCount(result.pageCount);
       if (!title) {
@@ -112,24 +116,28 @@ export function AdminDashboard({
 
     setSubmittingBook(true);
     try {
-      await createBookRecord({
-        title,
-        author,
-        category,
-        isbn,
-        accessionNumber,
-        publishedYear,
-        pageCount: uploadedPdf.pageCount || pageCount,
-        synopsis,
-        coverUrl,
-        pdfUrl: uploadedPdf.pdfUrl,
-        fileName: uploadedPdf.fileName,
-        fileSizeBytes: uploadedPdf.fileSizeBytes,
-        totalCopies,
-        loanDurationDays,
-        createdBy: adminUid,
-      });
+      await createBookRecord(
+        {
+          title,
+          author,
+          category,
+          isbn,
+          accessionNumber,
+          publishedYear,
+          pageCount: uploadedPdf.pageCount || pageCount,
+          synopsis,
+          coverUrl,
+          pdfUrl: uploadedPdf.pdfUrl,
+          fileName: uploadedPdf.fileName,
+          fileSizeBytes: uploadedPdf.fileSizeBytes,
+          totalCopies,
+          loanDurationDays,
+          createdBy: adminUid,
+        },
+        customToken
+      );
 
+      await onDataMutated?.();
       setTitle('');
       setAuthor('');
       setSynopsis('');
@@ -165,7 +173,8 @@ export function AdminDashboard({
   async function handleSendReminder(loan: Loan) {
     setBusyLoanId(loan.id);
     try {
-      await sendManualOverdueReminder(loan);
+      await sendManualOverdueReminder(loan, customToken);
+      await onDataMutated?.();
       onStatusMessage(`Notifikasi pengingat telah dikirim kepada ${loan.userName}.`);
     } catch (err) {
       onStatusMessage(
@@ -180,7 +189,8 @@ export function AdminDashboard({
   async function handleSimulateOverdue(loan: Loan) {
     setBusyLoanId(loan.id);
     try {
-      await simulateOverdueLoanForTesting(loan);
+      await simulateOverdueLoanForTesting(loan, customToken);
+      await onDataMutated?.();
       onStatusMessage(
         `Jatuh tempo "${loan.bookTitle}" disimulasikan terlambat 3 hari. Notifikasi keterlambatan akan aktif otomatis.`
       );
@@ -198,7 +208,8 @@ export function AdminDashboard({
     setBusyLoanId(loan.id);
     try {
       const targetBook = books.find((b) => b.id === loan.bookId);
-      await returnBookAtomic(loan, targetBook);
+      await returnBookAtomic(loan, targetBook, customToken);
+      await onDataMutated?.();
       onStatusMessage(`Buku "${loan.bookTitle}" telah ditandai dikembalikan.`);
     } catch (err) {
       onStatusMessage(
@@ -214,7 +225,8 @@ export function AdminDashboard({
     setBusyBookId(book.id);
     try {
       const nextTotal = Math.max(1, book.totalCopies + delta);
-      await updateBookCopiesAndDuration(book, nextTotal, book.loanDurationDays);
+      await updateBookCopiesAndDuration(book, nextTotal, book.loanDurationDays, customToken);
+      await onDataMutated?.();
       onStatusMessage(`Stok "${book.title}" diperbarui menjadi ${nextTotal} eksemplar.`);
     } catch (err) {
       onStatusMessage(
@@ -229,7 +241,8 @@ export function AdminDashboard({
   async function handleDeleteBook(book: Book) {
     setBusyBookId(book.id);
     try {
-      await deleteBookRecord(book.id);
+      await deleteBookRecord(book.id, customToken);
+      await onDataMutated?.();
       onStatusMessage(`Buku "${book.title}" dihapus dari katalog.`);
     } catch (err) {
       onStatusMessage(

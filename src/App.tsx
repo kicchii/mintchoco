@@ -18,10 +18,12 @@ import {
   Trash2,
 } from 'lucide-react';
 import { AdminDashboard } from './components/AdminDashboard';
+import { AuthModal, type CustomAuthSession } from './components/AuthModal';
 import { BookDetailModal } from './components/BookDetailModal';
 import { CoverImage } from './components/CoverImage';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { PdfReaderModal } from './components/PdfReaderModal';
+import { INITIAL_CATALOG_BOOKS } from './data/seedBooks';
 import {
   auth,
   db,
@@ -34,6 +36,9 @@ import {
   borrowBookAtomic,
   deleteNotificationItem,
   ensureUserDocument,
+  fetchServerBooks,
+  fetchServerLoans,
+  fetchServerNotifications,
   getDaysOverdue,
   getDaysRemaining,
   isAdminEmail,
@@ -44,7 +49,6 @@ import {
   syncOverdueNotificationsForLoans,
   updateReadingProgress,
 } from './services/libraryService';
-import { INITIAL_CATALOG_BOOKS } from './data/seedBooks';
 import type { Book, Loan, NotificationItem } from './types/library';
 
 type ActiveSection = 'catalog' | 'loans' | 'notifications' | 'admin';
@@ -54,12 +58,20 @@ const HERO_IMAGE_URL = '/src/assets/images/hero_kicchive_library_1795676519594.j
 function KicchiveWorkspace() {
   const [user, setUser] = useState<User | null>(null);
   const [authReady, setAuthReady] = useState(false);
-  const [isAdmin, setIsAdmin] = useState(false);
+  const [isFirebaseAdmin, setIsFirebaseAdmin] = useState(false);
+  const [customSession, setCustomSession] = useState<CustomAuthSession | null>(null);
 
-  const [books, setBooks] = useState<Book[]>([]);
+  const [authModalTab, setAuthModalTab] = useState<'admin' | 'member' | null>(null);
+
+  const [firestoreBooks, setFirestoreBooks] = useState<Book[]>([]);
+  const [serverBooks, setServerBooks] = useState<Book[]>([]);
   const [booksLoading, setBooksLoading] = useState(true);
-  const [loans, setLoans] = useState<Loan[]>([]);
-  const [notifications, setNotifications] = useState<NotificationItem[]>([]);
+
+  const [firestoreLoans, setFirestoreLoans] = useState<Loan[]>([]);
+  const [serverLoans, setServerLoans] = useState<Loan[]>([]);
+
+  const [firestoreNotifications, setFirestoreNotifications] = useState<NotificationItem[]>([]);
+  const [serverNotifications, setServerNotifications] = useState<NotificationItem[]>([]);
 
   const [activeSection, setActiveSection] = useState<ActiveSection>('catalog');
   const [searchQuery, setSearchQuery] = useState('');
@@ -79,6 +91,11 @@ function KicchiveWorkspace() {
   const [busyLoanId, setBusyLoanId] = useState<string | null>(null);
   const [toast, setToast] = useState<{ text: string; isError: boolean } | null>(null);
 
+  const isSignedIn = Boolean(customSession || user);
+  const isAdmin = Boolean(customSession?.role === 'admin' || (!customSession && isFirebaseAdmin));
+  const activeUid = customSession?.uid || user?.uid || '';
+  const customToken = customSession?.token || null;
+
   const showToast = useCallback((text: string, isError = false) => {
     setToast({ text, isError });
   }, []);
@@ -89,9 +106,34 @@ function KicchiveWorkspace() {
     return () => window.clearTimeout(timer);
   }, [toast]);
 
+  const refreshServerData = useCallback(async () => {
+    const nextBooks = await fetchServerBooks();
+    setServerBooks(nextBooks);
+    if (customToken) {
+      const [nextLoans, nextNotifs] = await Promise.all([
+        fetchServerLoans(customToken),
+        fetchServerNotifications(customToken),
+      ]);
+      setServerLoans(nextLoans);
+      setServerNotifications(nextNotifs);
+    }
+  }, [customToken]);
+
   useEffect(() => {
     testConnection();
+    fetchServerBooks()
+      .then((list) => setServerBooks(list))
+      .catch(() => undefined);
   }, []);
+
+  useEffect(() => {
+    if (!customToken) {
+      setServerLoans([]);
+      setServerNotifications([]);
+      return;
+    }
+    refreshServerData().catch(() => undefined);
+  }, [customToken, refreshServerData]);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (nextUser) => {
@@ -99,14 +141,14 @@ function KicchiveWorkspace() {
       if (nextUser) {
         try {
           const adminFlag = await ensureUserDocument(nextUser);
-          setIsAdmin(adminFlag);
+          setIsFirebaseAdmin(adminFlag);
         } catch {
-          setIsAdmin(isAdminEmail(nextUser.email));
+          setIsFirebaseAdmin(isAdminEmail(nextUser.email));
         }
       } else {
-        setIsAdmin(false);
-        setLoans([]);
-        setNotifications([]);
+        setIsFirebaseAdmin(false);
+        setFirestoreLoans([]);
+        setFirestoreNotifications([]);
       }
       setAuthReady(true);
     });
@@ -127,7 +169,7 @@ function KicchiveWorkspace() {
             id: docSnap.id,
           }))
           .sort((a, b) => (b.createdAt?.toMillis?.() ?? 0) - (a.createdAt?.toMillis?.() ?? 0));
-        setBooks(list);
+        setFirestoreBooks(list);
         setBooksLoading(false);
       },
       (error) => {
@@ -139,13 +181,13 @@ function KicchiveWorkspace() {
   }, []);
 
   useEffect(() => {
-    if (!authReady || !user || !isAdmin || booksLoading || books.length > 0) return;
+    if (!authReady || !user || !isFirebaseAdmin || booksLoading || firestoreBooks.length > 0) return;
     seedInitialCatalog(user.uid).catch(() => undefined);
-  }, [authReady, user, isAdmin, booksLoading, books.length]);
+  }, [authReady, user, isFirebaseAdmin, booksLoading, firestoreBooks.length]);
 
   useEffect(() => {
     if (!authReady || !user) return;
-    const loansQuery = isAdmin
+    const loansQuery = isFirebaseAdmin
       ? query(collection(db, 'loans'))
       : query(collection(db, 'loans'), where('userId', '==', user.uid));
 
@@ -158,14 +200,14 @@ function KicchiveWorkspace() {
             id: docSnap.id,
           }))
           .sort((a, b) => (b.borrowedAt?.toMillis?.() ?? 0) - (a.borrowedAt?.toMillis?.() ?? 0));
-        setLoans(list);
+        setFirestoreLoans(list);
       },
       (error) => {
         handleFirestoreError(error, OperationType.LIST, 'loans');
       }
     );
     return () => unsubscribe();
-  }, [authReady, user, isAdmin]);
+  }, [authReady, user, isFirebaseAdmin]);
 
   useEffect(() => {
     if (!authReady || !user) return;
@@ -183,7 +225,7 @@ function KicchiveWorkspace() {
             id: docSnap.id,
           }))
           .sort((a, b) => (b.createdAt?.toMillis?.() ?? 0) - (a.createdAt?.toMillis?.() ?? 0));
-        setNotifications(list);
+        setFirestoreNotifications(list);
       },
       (error) => {
         handleFirestoreError(error, OperationType.LIST, 'notifications');
@@ -193,14 +235,37 @@ function KicchiveWorkspace() {
   }, [authReady, user]);
 
   useEffect(() => {
-    if (!authReady || !user || loans.length === 0) return;
-    syncOverdueNotificationsForLoans(loans, notifications, user.uid).catch(() => undefined);
-  }, [authReady, user, loans, notifications]);
+    if (!authReady || !user || firestoreLoans.length === 0) return;
+    syncOverdueNotificationsForLoans(firestoreLoans, firestoreNotifications, user.uid).catch(
+      () => undefined
+    );
+  }, [authReady, user, firestoreLoans, firestoreNotifications]);
+
+  // Unified catalog: combine server-persisted books + Firestore books + curated initial preview
+  const catalogBooks = useMemo(() => {
+    if (customToken) {
+      return serverBooks.length > 0 ? serverBooks : INITIAL_CATALOG_BOOKS;
+    }
+    if (firestoreBooks.length > 0 && serverBooks.length > 0) {
+      const merged = new Map<string, Book>();
+      for (const b of serverBooks) merged.set(b.id, b);
+      for (const b of firestoreBooks) merged.set(b.id, b);
+      return Array.from(merged.values()).sort(
+        (a, b) => (b.createdAt?.toMillis?.() ?? 0) - (a.createdAt?.toMillis?.() ?? 0)
+      );
+    }
+    if (firestoreBooks.length > 0) return firestoreBooks;
+    if (serverBooks.length > 0) return serverBooks;
+    return INITIAL_CATALOG_BOOKS;
+  }, [customToken, serverBooks, firestoreBooks]);
+
+  const loans = customToken ? serverLoans : firestoreLoans;
+  const notifications = customToken ? serverNotifications : firestoreNotifications;
 
   const myLoans = useMemo(() => {
-    if (!user) return [];
-    return loans.filter((l) => l.userId === user.uid);
-  }, [loans, user]);
+    if (!activeUid) return [];
+    return loans.filter((l) => l.userId === activeUid);
+  }, [loans, activeUid]);
 
   const myActiveLoans = useMemo(
     () => myLoans.filter((l) => l.status === 'borrowed'),
@@ -220,11 +285,6 @@ function KicchiveWorkspace() {
   const unreadNotifCount = useMemo(
     () => notifications.filter((n) => !n.isRead).length,
     [notifications]
-  );
-
-  const catalogBooks = useMemo(
-    () => (books.length > 0 ? books : INITIAL_CATALOG_BOOKS),
-    [books]
   );
 
   const categories = useMemo(() => {
@@ -256,34 +316,48 @@ function KicchiveWorkspace() {
     [catalogBooks]
   );
 
-  async function handleSignIn() {
+  async function handleGoogleSignIn() {
     try {
       await signInWithPopup(auth, googleProvider);
+      setCustomSession(null);
       showToast('Berhasil masuk ke perpustakaan digital Kicchive.');
     } catch (err) {
       showToast(
-        err instanceof Error ? err.message : 'Proses masuk dibatalkan atau gagal.',
+        err instanceof Error ? err.message : 'Proses masuk Google dibatalkan atau gagal.',
         true
       );
     }
   }
 
+  function handleCustomSessionLogin(session: CustomAuthSession) {
+    setCustomSession(session);
+    if (session.role === 'admin') {
+      setActiveSection('admin');
+      showToast(`Selamat datang di Dasbor Admin, ${session.name}.`);
+    } else {
+      showToast(`Halo ${session.name}, Anda siap meminjam buku daring.`);
+    }
+  }
+
   async function handleSignOut() {
-    await signOut(auth);
+    setCustomSession(null);
+    if (user) {
+      await signOut(auth);
+    }
     setActiveSection('catalog');
     showToast('Anda telah keluar dari sesi Kicchive.');
   }
 
   async function handleBorrowBook(book: Book) {
-    if (!user) {
-      await handleSignIn();
+    if (!isSignedIn) {
+      setAuthModalTab('member');
       return;
     }
 
-    if (books.length === 0) {
+    if (!customToken && firestoreBooks.length === 0) {
       handleOpenReader(book);
       showToast(
-        'Membuka pembaca PDF langsung. Admin perlu masuk satu kali untuk mengaktifkan pencatatan peminjaman.'
+        'Membuka pembaca PDF langsung. Masuk sebagai Admin satu kali untuk mengaktifkan pencatatan peminjaman cloud.'
       );
       return;
     }
@@ -303,7 +377,8 @@ function KicchiveWorkspace() {
 
     setBusyBookId(book.id);
     try {
-      const loanId = await borrowBookAtomic(book, user);
+      const loanId = await borrowBookAtomic(book, user, customToken);
+      await refreshServerData();
       showToast(
         `Berhasil meminjam "${book.title}". Batas pengembalian ${book.loanDurationDays} hari.`
       );
@@ -328,8 +403,9 @@ function KicchiveWorkspace() {
   async function handleReturnLoan(loan: Loan) {
     setBusyLoanId(loan.id);
     try {
-      const targetBook = books.find((b) => b.id === loan.bookId);
-      await returnBookAtomic(loan, targetBook);
+      const targetBook = catalogBooks.find((b) => b.id === loan.bookId);
+      await returnBookAtomic(loan, targetBook, customToken);
+      await refreshServerData();
       showToast(`Buku "${loan.bookTitle}" telah dikembalikan. Terima kasih.`);
     } catch (err) {
       showToast(
@@ -355,10 +431,10 @@ function KicchiveWorkspace() {
   const handleReaderPageChange = useCallback(
     (page: number) => {
       if (readerSession?.loanId) {
-        updateReadingProgress(readerSession.loanId, page).catch(() => undefined);
+        updateReadingProgress(readerSession.loanId, page, customToken).catch(() => undefined);
       }
     },
-    [readerSession?.loanId]
+    [readerSession?.loanId, customToken]
   );
 
   return (
@@ -415,24 +491,28 @@ function KicchiveWorkspace() {
             >
               {unreadNotifCount > 0 ? `Notifikasi (${unreadNotifCount})` : 'Notifikasi'}
             </button>
-            {isAdmin && (
-              <button
-                type="button"
-                onClick={() => setActiveSection('admin')}
-                className={`whitespace-nowrap shrink-0 transition-colors pb-0.5 ${
-                  activeSection === 'admin'
-                    ? 'text-[#3E2723] border-b-2 border-[#68B998]'
-                    : 'hover:text-[#3E2723]'
-                }`}
-              >
-                Dasbor Admin
-              </button>
-            )}
+            <button
+              type="button"
+              onClick={() => {
+                if (isAdmin) {
+                  setActiveSection('admin');
+                } else {
+                  setAuthModalTab('admin');
+                }
+              }}
+              className={`whitespace-nowrap shrink-0 transition-colors pb-0.5 ${
+                activeSection === 'admin'
+                  ? 'text-[#3E2723] border-b-2 border-[#68B998]'
+                  : 'hover:text-[#3E2723]'
+              }`}
+            >
+              Dasbor Admin
+            </button>
           </nav>
 
           {/* Zone 3: 1 primary action */}
           <div className="shrink-0">
-            {user ? (
+            {isSignedIn ? (
               <button
                 type="button"
                 onClick={handleSignOut}
@@ -443,7 +523,7 @@ function KicchiveWorkspace() {
             ) : (
               <button
                 type="button"
-                onClick={handleSignIn}
+                onClick={() => setAuthModalTab('admin')}
                 className="px-4 py-2 rounded-xl text-xs font-semibold bg-[#9CE0C2] text-[#3E2723] hover:bg-[#84D5B1] transition-colors whitespace-nowrap shrink-0"
               >
                 Masuk
@@ -458,7 +538,9 @@ function KicchiveWorkspace() {
             type="button"
             onClick={() => setActiveSection('catalog')}
             className={`whitespace-nowrap shrink-0 ${
-              activeSection === 'catalog' ? 'text-[#3E2723] underline decoration-[#68B998] decoration-2' : ''
+              activeSection === 'catalog'
+                ? 'text-[#3E2723] underline decoration-[#68B998] decoration-2'
+                : ''
             }`}
           >
             Katalog
@@ -467,7 +549,9 @@ function KicchiveWorkspace() {
             type="button"
             onClick={() => setActiveSection('loans')}
             className={`whitespace-nowrap shrink-0 ${
-              activeSection === 'loans' ? 'text-[#3E2723] underline decoration-[#68B998] decoration-2' : ''
+              activeSection === 'loans'
+                ? 'text-[#3E2723] underline decoration-[#68B998] decoration-2'
+                : ''
             }`}
           >
             Pinjaman ({myActiveLoans.length})
@@ -476,27 +560,35 @@ function KicchiveWorkspace() {
             type="button"
             onClick={() => setActiveSection('notifications')}
             className={`whitespace-nowrap shrink-0 ${
-              activeSection === 'notifications' ? 'text-[#3E2723] underline decoration-[#68B998] decoration-2' : ''
+              activeSection === 'notifications'
+                ? 'text-[#3E2723] underline decoration-[#68B998] decoration-2'
+                : ''
             }`}
           >
             Notifikasi ({unreadNotifCount})
           </button>
-          {isAdmin && (
-            <button
-              type="button"
-              onClick={() => setActiveSection('admin')}
-              className={`whitespace-nowrap shrink-0 ${
-                activeSection === 'admin' ? 'text-[#3E2723] underline decoration-[#68B998] decoration-2' : ''
-              }`}
-            >
-              Dasbor Admin
-            </button>
-          )}
+          <button
+            type="button"
+            onClick={() => {
+              if (isAdmin) {
+                setActiveSection('admin');
+              } else {
+                setAuthModalTab('admin');
+              }
+            }}
+            className={`whitespace-nowrap shrink-0 ${
+              activeSection === 'admin'
+                ? 'text-[#3E2723] underline decoration-[#68B998] decoration-2'
+                : ''
+            }`}
+          >
+            Dasbor Admin
+          </button>
         </div>
       </header>
 
       {/* Overdue Return Alert Banner */}
-      {user && myOverdueLoans.length > 0 && (
+      {isSignedIn && myOverdueLoans.length > 0 && (
         <div className="bg-[#FEF3C7] border-b border-[#FDE68A] text-[#3E2723] px-6 py-2.5 text-xs">
           <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-3">
             <div className="flex items-center gap-2 font-semibold text-[#B91C1C]">
@@ -561,13 +653,21 @@ function KicchiveWorkspace() {
                       Jelajahi Koleksi
                       <ArrowRight className="w-4 h-4" />
                     </a>
-                    {user && (
+                    {isSignedIn ? (
                       <button
                         type="button"
                         onClick={() => setActiveSection('loans')}
                         className="px-4 py-2.5 rounded-xl text-sm font-semibold bg-[#FEF3C7] border border-[#FDE68A] text-[#3E2723] hover:bg-[#FDE68A] transition-colors whitespace-nowrap"
                       >
                         Pinjaman Saya ({myActiveLoans.length})
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => setAuthModalTab('admin')}
+                        className="px-4 py-2.5 rounded-xl text-sm font-semibold bg-[#FEF3C7] border border-[#FDE68A] text-[#3E2723] hover:bg-[#FDE68A] transition-colors whitespace-nowrap"
+                      >
+                        Masuk Admin / Anggota
                       </button>
                     )}
                   </div>
@@ -658,7 +758,7 @@ function KicchiveWorkspace() {
               </div>
 
               {/* Catalog Grid */}
-              {booksLoading && books.length === 0 && catalogBooks.length === 0 ? (
+              {booksLoading && catalogBooks.length === 0 ? (
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
                   {[1, 2, 3, 4].map((n) => (
                     <div
@@ -725,7 +825,7 @@ function KicchiveWorkspace() {
                             {book.availableCopies}/{book.totalCopies} stok
                           </span>
 
-                          {activeLoan || !user ? (
+                          {activeLoan || !isSignedIn ? (
                             <button
                               type="button"
                               onClick={() => handleOpenReader(book, activeLoan)}
@@ -779,21 +879,21 @@ function KicchiveWorkspace() {
               </button>
             </div>
 
-            {!user ? (
+            {!isSignedIn ? (
               <div className="bg-white border border-[#DFD3C3] rounded-2xl p-12 text-center space-y-4">
                 <h2 className="font-display text-2xl font-semibold">
                   Masuk untuk melihat daftar pinjaman Anda
                 </h2>
                 <p className="text-sm text-[#6D4C41] max-w-md mx-auto">
-                  Anda dapat meminjam buku secara daring, melanjutkan halaman terakhir yang dibaca,
-                  dan menerima pengingat pengembalian setelah masuk dengan Google.
+                  Anda dapat masuk cepat pakai nama (tanpa Google) atau akun Google untuk meminjam
+                  buku daring, menyimpan progres halaman, dan menerima pengingat pengembalian.
                 </p>
                 <button
                   type="button"
-                  onClick={handleSignIn}
+                  onClick={() => setAuthModalTab('member')}
                   className="px-5 py-2.5 rounded-xl text-xs font-semibold bg-[#9CE0C2] text-[#3E2723] hover:bg-[#84D5B1]"
                 >
-                  Masuk dengan Google
+                  Masuk sebagai Anggota
                 </button>
               </div>
             ) : myActiveLoans.length === 0 && myReturnedLoans.length === 0 ? (
@@ -814,7 +914,6 @@ function KicchiveWorkspace() {
               </div>
             ) : (
               <div className="space-y-10">
-                {/* Active Loans */}
                 <div className="space-y-4">
                   <h2 className="font-display text-2xl font-semibold text-[#3E2723]">
                     Sedang Dipinjam ({myActiveLoans.length})
@@ -884,7 +983,6 @@ function KicchiveWorkspace() {
                                 </p>
                               </div>
 
-                              {/* Reading Progress */}
                               <div className="space-y-1">
                                 <div className="flex items-center justify-between text-xs text-[#6D4C41] font-mono tabular-nums">
                                   <span>
@@ -934,7 +1032,6 @@ function KicchiveWorkspace() {
                   )}
                 </div>
 
-                {/* Loan History */}
                 {myReturnedLoans.length > 0 && (
                   <div className="space-y-4">
                     <h2 className="font-display text-2xl font-semibold text-[#3E2723]">
@@ -983,10 +1080,13 @@ function KicchiveWorkspace() {
                 </h1>
               </div>
 
-              {user && unreadNotifCount > 0 && (
+              {isSignedIn && unreadNotifCount > 0 && (
                 <button
                   type="button"
-                  onClick={() => markAllNotificationsAsRead(notifications)}
+                  onClick={async () => {
+                    await markAllNotificationsAsRead(notifications, customToken);
+                    await refreshServerData();
+                  }}
                   className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold border border-[#DFD3C3] bg-white hover:bg-[#E2F5EC] whitespace-nowrap"
                 >
                   <Check className="w-3.5 h-3.5" />
@@ -995,7 +1095,7 @@ function KicchiveWorkspace() {
               )}
             </div>
 
-            {!user ? (
+            {!isSignedIn ? (
               <div className="bg-white border border-[#DFD3C3] rounded-2xl p-12 text-center space-y-4">
                 <Bell className="w-8 h-8 mx-auto text-[#8D6E63]" strokeWidth={1.75} />
                 <h2 className="font-display text-2xl font-semibold">
@@ -1003,10 +1103,10 @@ function KicchiveWorkspace() {
                 </h2>
                 <button
                   type="button"
-                  onClick={handleSignIn}
+                  onClick={() => setAuthModalTab('member')}
                   className="px-5 py-2.5 rounded-xl text-xs font-semibold bg-[#9CE0C2] text-[#3E2723] hover:bg-[#84D5B1]"
                 >
-                  Masuk dengan Google
+                  Masuk sebagai Anggota
                 </button>
               </div>
             ) : notifications.length === 0 ? (
@@ -1074,7 +1174,10 @@ function KicchiveWorkspace() {
                       {!notif.isRead && (
                         <button
                           type="button"
-                          onClick={() => markNotificationAsRead(notif.id)}
+                          onClick={async () => {
+                            await markNotificationAsRead(notif.id, customToken);
+                            await refreshServerData();
+                          }}
                           className="px-3 py-1.5 rounded-xl text-xs font-semibold border border-[#DFD3C3] hover:bg-[#FEF3C7] whitespace-nowrap"
                         >
                           Dibaca
@@ -1082,7 +1185,10 @@ function KicchiveWorkspace() {
                       )}
                       <button
                         type="button"
-                        onClick={() => deleteNotificationItem(notif.id)}
+                        onClick={async () => {
+                          await deleteNotificationItem(notif.id, customToken);
+                          await refreshServerData();
+                        }}
                         aria-label="Hapus notifikasi"
                         className="p-1.5 rounded-lg text-[#8D6E63] hover:text-[#C62828]"
                       >
@@ -1099,30 +1205,41 @@ function KicchiveWorkspace() {
         {/* SECTION 4: ADMIN DASHBOARD */}
         {activeSection === 'admin' && (
           <>
-            {user && isAdmin ? (
+            {isSignedIn && isAdmin ? (
               <AdminDashboard
-                adminUid={user.uid}
-                books={books}
+                adminUid={activeUid}
+                customToken={customToken}
+                books={catalogBooks}
                 loans={loans}
+                onDataMutated={refreshServerData}
                 onPreviewPdf={(book) => handleOpenReader(book)}
                 onStatusMessage={showToast}
               />
             ) : (
               <section className="max-w-xl mx-auto px-6 py-16 text-center space-y-4">
                 <h1 className="font-display text-3xl font-semibold">
-                  Akses Terbatas untuk Admin Kicchive
+                  Masuk ke Dasbor Admin Kicchive
                 </h1>
                 <p className="text-sm text-[#6D4C41]">
-                  Unggah berkas PDF dan manajemen peminjaman hanya tersedia untuk pengelola
-                  terotorisasi.
+                  Gunakan frasa akses admin (tanpa Google) untuk mengunggah berkas PDF, mengelola
+                  koleksi, dan mengirim pengingat pengembalian.
                 </p>
-                <button
-                  type="button"
-                  onClick={() => setActiveSection('catalog')}
-                  className="px-5 py-2.5 rounded-xl text-xs font-semibold bg-[#4E342E] text-[#FFFDF8]"
-                >
-                  Kembali ke Katalog
-                </button>
+                <div className="flex justify-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setAuthModalTab('admin')}
+                    className="px-5 py-2.5 rounded-xl text-xs font-semibold bg-[#9CE0C2] text-[#3E2723] hover:bg-[#84D5B1]"
+                  >
+                    Masuk Admin (Frasa Akses)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setActiveSection('catalog')}
+                    className="px-5 py-2.5 rounded-xl text-xs font-semibold bg-[#4E342E] text-[#FFFDF8]"
+                  >
+                    Kembali ke Katalog
+                  </button>
+                </div>
               </section>
             )}
           </>
@@ -1139,16 +1256,29 @@ function KicchiveWorkspace() {
         </div>
       </footer>
 
+      {/* Auth Modal (Admin Passphrase / Member Session / Google) */}
+      {authModalTab && (
+        <AuthModal
+          initialTab={authModalTab}
+          onCustomSession={handleCustomSessionLogin}
+          onGoogleSignIn={handleGoogleSignIn}
+          onClose={() => setAuthModalTab(null)}
+        />
+      )}
+
       {/* Book Detail Modal */}
       {detailBook && (
         <BookDetailModal
           book={detailBook}
           activeLoan={myActiveLoans.find((l) => l.bookId === detailBook.id)}
-          isSignedIn={Boolean(user)}
+          isSignedIn={isSignedIn}
           isBorrowing={busyBookId === detailBook.id}
           onBorrow={handleBorrowBook}
           onRead={handleOpenReader}
-          onSignIn={handleSignIn}
+          onSignIn={() => {
+            setDetailBook(null);
+            setAuthModalTab('member');
+          }}
           onClose={() => setDetailBook(null)}
         />
       )}

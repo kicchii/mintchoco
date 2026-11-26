@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import express from 'express';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -8,12 +9,92 @@ import { createServer as createViteServer } from 'vite';
 const PORT = Number(process.env.PORT || 3000);
 const ROOT_DIR = process.cwd();
 const UPLOADS_DIR = path.resolve(ROOT_DIR, 'uploads', 'pdfs');
+const STORE_PATH = path.resolve(ROOT_DIR, 'uploads', 'kicchive-store.json');
 const CONFIG_PATH = path.resolve(ROOT_DIR, 'firebase-applet-config.json');
+const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
 
 interface FirebaseAppletConfig {
   apiKey?: string;
   projectId?: string;
   firestoreDatabaseId?: string;
+}
+
+interface StoredBook {
+  id: string;
+  title: string;
+  author: string;
+  category: string;
+  isbn: string;
+  accessionNumber: string;
+  publishedYear: number;
+  pageCount: number;
+  synopsis: string;
+  coverUrl: string;
+  pdfUrl: string;
+  fileName: string;
+  fileSizeBytes: number;
+  totalCopies: number;
+  availableCopies: number;
+  loanDurationDays: number;
+  createdBy: string;
+  createdAtMs: number;
+  updatedAtMs: number;
+}
+
+interface StoredLoan {
+  id: string;
+  bookId: string;
+  bookTitle: string;
+  bookAuthor: string;
+  bookCoverUrl: string;
+  pdfUrl: string;
+  userId: string;
+  userName: string;
+  userEmail: string;
+  status: 'borrowed' | 'returned';
+  borrowedAtMs: number;
+  dueAtMs: number;
+  returnedAtMs?: number;
+  lastReadPage: number;
+  totalPages: number;
+  overdueNotified: boolean;
+  updatedAtMs: number;
+}
+
+interface StoredNotification {
+  id: string;
+  userId: string;
+  loanId: string;
+  bookId: string;
+  bookTitle: string;
+  type: 'overdue' | 'due_soon' | 'admin_reminder' | 'returned';
+  title: string;
+  message: string;
+  daysOverdue: number;
+  isRead: boolean;
+  createdAtMs: number;
+  updatedAtMs: number;
+}
+
+interface AdminCredentials {
+  name: string;
+  salt: string;
+  hash: string;
+  claimedAtMs: number;
+}
+
+interface LibraryStore {
+  adminCreds: AdminCredentials | null;
+  books: StoredBook[];
+  loans: StoredLoan[];
+  notifications: StoredNotification[];
+}
+
+interface SessionPayload {
+  sub: string;
+  name: string;
+  role: 'admin' | 'member';
+  exp: number;
 }
 
 function readFirebaseConfig(): FirebaseAppletConfig {
@@ -26,21 +107,36 @@ function readFirebaseConfig(): FirebaseAppletConfig {
 }
 
 interface SeedPdfSpec {
+  id: string;
   filename: string;
   title: string;
   author: string;
   accessionNumber: string;
   category: string;
+  isbn: string;
+  publishedYear: number;
+  synopsis: string;
+  coverUrl: string;
+  totalCopies: number;
+  loanDurationDays: number;
   chapters: Array<{ heading: string; paragraphs: string[] }>;
 }
 
-const SEED_PDFS: SeedPdfSpec[] = [
+const SEED_SPECS: SeedPdfSpec[] = [
   {
+    id: 'kcv-arsitektur-cahaya',
     filename: 'arsitektur-cahaya.pdf',
     title: 'Arsitektur Cahaya dan Ruang Kontemplasi',
     author: 'Raka Pradipta',
     accessionNumber: 'KCV-2026-001',
     category: 'Arsitektur',
+    isbn: '978-602-8912-11-4',
+    publishedYear: 2025,
+    synopsis:
+      'Kajian mendalam tentang tata pencahayaan alami, materialitas kayu ek, batu travertine, dan kenyamanan akustik pada rancangan ruang baca perpustakaan publik kontemporer.',
+    coverUrl: '/src/assets/images/cover_arsitektur_cahaya_1795676519582.jpg',
+    totalCopies: 5,
+    loanDurationDays: 7,
     chapters: [
       {
         heading: 'Bab I. Geometri Bukaan dan Cahaya Alami',
@@ -65,11 +161,19 @@ const SEED_PDFS: SeedPdfSpec[] = [
     ],
   },
   {
+    id: 'kcv-ekologi-nusantara',
     filename: 'ekologi-nusantara.pdf',
     title: 'Atlas Ekologi Pesisir dan Hutan Bakau Nusantara',
     author: 'Nadia Kusumawardhani',
     accessionNumber: 'KCV-2026-002',
     category: 'Ekologi',
+    isbn: '978-602-8912-24-4',
+    publishedYear: 2024,
+    synopsis:
+      'Dokumentasi botani tentang peran akar tunjang mangrove dalam menahan abrasi, herbari paku-pakuan tropis, serta pengelolaan pesisir berbasis komunitas kepulauan.',
+    coverUrl: '/src/assets/images/cover_ekologi_nusantara_1795676519895.jpg',
+    totalCopies: 4,
+    loanDurationDays: 7,
     chapters: [
       {
         heading: 'Bab I. Akar Tunjang dan Penahan Abrasi',
@@ -93,11 +197,19 @@ const SEED_PDFS: SeedPdfSpec[] = [
     ],
   },
   {
+    id: 'kcv-tipografi-modern',
     filename: 'tipografi-modern.pdf',
     title: 'Kisi Tipografi Modern dan Tata Letak Editorial',
     author: 'Dimas Aryoseno',
     accessionNumber: 'KCV-2026-003',
     category: 'Desain',
+    isbn: '978-602-8912-38-1',
+    publishedYear: 2025,
+    synopsis:
+      'Panduan praktis proporsi kolom bacaan, hirarki huruf serif dan sans-serif, serta penerapan prinsip ruang negatif editorial pada publikasi cetak maupun pembaca PDF digital.',
+    coverUrl: '/src/assets/images/cover_tipografi_modern_1795676520648.jpg',
+    totalCopies: 6,
+    loanDurationDays: 14,
     chapters: [
       {
         heading: 'Bab I. Proporsi Kolom dan Ritme Baca',
@@ -121,11 +233,19 @@ const SEED_PDFS: SeedPdfSpec[] = [
     ],
   },
   {
+    id: 'kcv-filsafat-waktu',
     filename: 'filsafat-waktu.pdf',
     title: 'Meditasi tentang Waktu, Memori, dan Keberlanjutan',
     author: 'Surya Hadiwijaya',
     accessionNumber: 'KCV-2026-004',
     category: 'Filsafat',
+    isbn: '978-602-8912-45-9',
+    publishedYear: 2023,
+    synopsis:
+      'Esai filsafat mengenai perbedaan antara durasi kronologis alat ukur langit dan pengalaman waktu batin dalam membaca mendalam serta tanggung jawab menjaga arsip antargenerasi.',
+    coverUrl: '/src/assets/images/cover_filsafat_waktu_1795676519824.jpg',
+    totalCopies: 3,
+    loanDurationDays: 7,
     chapters: [
       {
         heading: 'Bab I. Astrolab dan Pengukuran Durasi',
@@ -143,11 +263,19 @@ const SEED_PDFS: SeedPdfSpec[] = [
     ],
   },
   {
+    id: 'kcv-sejarah-maritim',
     filename: 'sejarah-maritim.pdf',
     title: 'Peta Laut dan Jalur Niaga Maritim Kepulauan',
     author: 'Laksmi Pramudita',
     accessionNumber: 'KCV-2026-005',
     category: 'Sejarah',
+    isbn: '978-602-8912-52-7',
+    publishedYear: 2024,
+    synopsis:
+      'Penelusuran arsip pelayaran angin muson, peta garis pantai bersejarah, dan catatan harian nakhoda yang membentuk jaringan niaga maritim di perairan Nusantara.',
+    coverUrl: '/src/assets/images/cover_sejarah_maritim_1795676521750.jpg',
+    totalCopies: 4,
+    loanDurationDays: 10,
     chapters: [
       {
         heading: 'Bab I. Angin Muson dan Pelayaran Nusantara',
@@ -185,7 +313,7 @@ function wrapText(text: string, maxChars: number): string[] {
 async function ensureSeedPdfs(): Promise<void> {
   fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 
-  for (const spec of SEED_PDFS) {
+  for (const spec of SEED_SPECS) {
     const targetPath = path.join(UPLOADS_DIR, spec.filename);
     if (fs.existsSync(targetPath)) {
       continue;
@@ -254,7 +382,7 @@ async function ensureSeedPdfs(): Promise<void> {
       thickness: 0.75,
       color: rgb(0.84, 0.81, 0.75),
     });
-    coverPage.drawText('Diterbitkan untuk pembacaan daring melalui aplikasi perpustakaan digital kicchive.', {
+    coverPage.drawText('Diterbitkan untuk pembacaan daring melalui aplikasi perpustakaan digital Kicchive.', {
       x: 72,
       y: 124,
       size: 10,
@@ -321,7 +449,7 @@ async function ensureSeedPdfs(): Promise<void> {
         thickness: 0.5,
         color: rgb(0.86, 0.83, 0.78),
       });
-      page.drawText(`kicchive · ${spec.accessionNumber}`, {
+      page.drawText(`Kicchive · ${spec.accessionNumber}`, {
         x: 72,
         y: 56,
         size: 9,
@@ -343,7 +471,100 @@ async function ensureSeedPdfs(): Promise<void> {
   }
 }
 
-async function verifyFirebaseIdToken(idToken: string): Promise<{ uid: string; email: string; emailVerified: boolean } | null> {
+function loadStore(): LibraryStore {
+  if (fs.existsSync(STORE_PATH)) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(STORE_PATH, 'utf-8')) as Partial<LibraryStore>;
+      return {
+        adminCreds: parsed.adminCreds ?? null,
+        books: Array.isArray(parsed.books) ? parsed.books : [],
+        loans: Array.isArray(parsed.loans) ? parsed.loans : [],
+        notifications: Array.isArray(parsed.notifications) ? parsed.notifications : [],
+      };
+    } catch {
+      // Fallback to seeded store
+    }
+  }
+
+  const now = Date.now();
+  const initialBooks: StoredBook[] = SEED_SPECS.map((spec, idx) => {
+    const filePath = path.join(UPLOADS_DIR, spec.filename);
+    const stat = fs.existsSync(filePath) ? fs.statSync(filePath) : null;
+    return {
+      id: spec.id,
+      title: spec.title,
+      author: spec.author,
+      category: spec.category,
+      isbn: spec.isbn,
+      accessionNumber: spec.accessionNumber,
+      publishedYear: spec.publishedYear,
+      pageCount: spec.chapters.length + 1,
+      synopsis: spec.synopsis,
+      coverUrl: spec.coverUrl,
+      pdfUrl: `/api/pdfs/${spec.filename}`,
+      fileName: spec.filename,
+      fileSizeBytes: stat?.size ?? 16000,
+      totalCopies: spec.totalCopies,
+      availableCopies: spec.totalCopies,
+      loanDurationDays: spec.loanDurationDays,
+      createdBy: 'kicchive_curatorial',
+      createdAtMs: now - idx * 1000,
+      updatedAtMs: now - idx * 1000,
+    };
+  });
+
+  const store: LibraryStore = {
+    adminCreds: null,
+    books: initialBooks,
+    loans: [],
+    notifications: [],
+  };
+  saveStore(store);
+  return store;
+}
+
+function saveStore(store: LibraryStore): void {
+  fs.mkdirSync(path.dirname(STORE_PATH), { recursive: true });
+  fs.writeFileSync(STORE_PATH, JSON.stringify(store, null, 2));
+}
+
+function hashPassphrase(passphrase: string, salt: string): string {
+  return crypto.scryptSync(passphrase, salt, 64).toString('hex');
+}
+
+function safeEqualText(a: string, b: string): boolean {
+  const bufA = Buffer.from(a, 'utf-8');
+  const bufB = Buffer.from(b, 'utf-8');
+  if (bufA.length !== bufB.length) return false;
+  return crypto.timingSafeEqual(bufA, bufB);
+}
+
+function signSessionToken(payload: SessionPayload): string {
+  const encoded = Buffer.from(JSON.stringify(payload)).toString('base64url');
+  const sig = crypto.createHmac('sha256', SESSION_SECRET).update(encoded).digest('base64url');
+  return `kcv_${encoded}.${sig}`;
+}
+
+function verifySessionToken(token: string): SessionPayload | null {
+  if (!token.startsWith('kcv_')) return null;
+  const raw = token.slice(4);
+  const parts = raw.split('.');
+  if (parts.length !== 2) return null;
+  const [encoded, sig] = parts;
+  const expectedSig = crypto.createHmac('sha256', SESSION_SECRET).update(encoded).digest('base64url');
+  if (!safeEqualText(sig, expectedSig)) return null;
+  try {
+    const decoded = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf-8')) as SessionPayload;
+    if (!decoded.sub || !decoded.role || decoded.exp < Date.now()) return null;
+    return decoded;
+  } catch {
+    return null;
+  }
+}
+
+async function verifyFirebaseIdToken(
+  idToken: string
+): Promise<{ uid: string; email: string; emailVerified: boolean } | null> {
   const config = readFirebaseConfig();
   if (!config.apiKey) return null;
   try {
@@ -371,7 +592,7 @@ async function verifyFirebaseIdToken(idToken: string): Promise<{ uid: string; em
   }
 }
 
-async function isAuthorizedAdmin(uid: string, email: string, emailVerified: boolean): Promise<boolean> {
+async function isFirebaseAdmin(uid: string, email: string, emailVerified: boolean): Promise<boolean> {
   if (!emailVerified) return false;
   if (email.toLowerCase() === 'fathiahasnaa@gmail.com') return true;
   const config = readFirebaseConfig();
@@ -385,6 +606,47 @@ async function isAuthorizedAdmin(uid: string, email: string, emailVerified: bool
   }
 }
 
+interface AuthenticatedCaller {
+  uid: string;
+  name: string;
+  email: string;
+  role: 'admin' | 'member';
+}
+
+async function resolveCaller(authHeader: string | undefined): Promise<AuthenticatedCaller | null> {
+  const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+  if (!token) return null;
+
+  const customSession = verifySessionToken(token);
+  if (customSession) {
+    return {
+      uid: customSession.sub,
+      name: customSession.name,
+      email: `${customSession.sub}@kicchive.local`,
+      role: customSession.role,
+    };
+  }
+
+  const fbUser = await verifyFirebaseIdToken(token);
+  if (!fbUser) return null;
+  const admin = await isFirebaseAdmin(fbUser.uid, fbUser.email, fbUser.emailVerified);
+  return {
+    uid: fbUser.uid,
+    name: fbUser.email.split('@')[0],
+    email: fbUser.email,
+    role: admin ? 'admin' : 'member',
+  };
+}
+
+function isSafeCoverUrl(url: string): boolean {
+  const trimmed = url.trim();
+  return (
+    trimmed.startsWith('/src/assets/') ||
+    trimmed.startsWith('/api/') ||
+    trimmed.startsWith('https://')
+  );
+}
+
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
@@ -394,36 +656,256 @@ const upload = multer({
 
 async function startServer(): Promise<void> {
   await ensureSeedPdfs();
+  const store = loadStore();
 
   const app = express();
-  app.use(express.json());
+  app.use(express.json({ limit: '1mb' }));
 
   app.get('/api/health', (_req, res) => {
     res.json({ ok: true, service: 'kicchive' });
   });
 
+  // ---------------------------------------------------------------
+  // Non-Google Admin & Member Session Routes
+  // ---------------------------------------------------------------
+  app.get('/api/admin/status', (_req, res) => {
+    const hasEnvPassphrase = Boolean(process.env.ADMIN_PASSPHRASE?.trim());
+    const hasClaimed = Boolean(store.adminCreds);
+    res.json({
+      requiresClaim: !hasEnvPassphrase && !hasClaimed,
+      hasEnvPassphrase,
+      adminName: store.adminCreds?.name || 'Admin Kicchive',
+    });
+  });
+
+  app.post('/api/admin/claim', (req, res) => {
+    const envPassphrase = process.env.ADMIN_PASSPHRASE?.trim();
+    if (envPassphrase || store.adminCreds) {
+      res.status(409).json({ error: 'Frasa akses admin sudah pernah diatur.' });
+      return;
+    }
+
+    const name = typeof req.body?.name === 'string' ? req.body.name.trim().slice(0, 60) : '';
+    const passphrase = typeof req.body?.passphrase === 'string' ? req.body.passphrase.trim() : '';
+    if (passphrase.length < 4 || passphrase.length > 128) {
+      res.status(400).json({ error: 'Frasa akses admin minimal 4 karakter.' });
+      return;
+    }
+
+    const salt = crypto.randomBytes(16).toString('hex');
+    const hash = hashPassphrase(passphrase, salt);
+    const adminName = name || 'Admin Kicchive';
+    store.adminCreds = {
+      name: adminName,
+      salt,
+      hash,
+      claimedAtMs: Date.now(),
+    };
+    saveStore(store);
+
+    const token = signSessionToken({
+      sub: 'kicchive_admin',
+      name: adminName,
+      role: 'admin',
+      exp: Date.now() + 7 * 24 * 60 * 60 * 1000,
+    });
+
+    res.status(201).json({
+      token,
+      user: { uid: 'kicchive_admin', name: adminName, role: 'admin' },
+    });
+  });
+
+  app.post('/api/admin/login', (req, res) => {
+    const name = typeof req.body?.name === 'string' ? req.body.name.trim().slice(0, 60) : '';
+    const passphrase = typeof req.body?.passphrase === 'string' ? req.body.passphrase.trim() : '';
+    if (!passphrase) {
+      res.status(400).json({ error: 'Masukkan frasa akses admin.' });
+      return;
+    }
+
+    const envPassphrase = process.env.ADMIN_PASSPHRASE?.trim();
+    let valid = false;
+    let adminName = name || store.adminCreds?.name || 'Admin Kicchive';
+
+    if (envPassphrase) {
+      valid = safeEqualText(passphrase, envPassphrase);
+    } else if (store.adminCreds) {
+      const candidateHash = hashPassphrase(passphrase, store.adminCreds.salt);
+      valid = safeEqualText(candidateHash, store.adminCreds.hash);
+    } else {
+      res.status(400).json({ error: 'Belum ada frasa admin yang diatur. Silakan atur terlebih dahulu.' });
+      return;
+    }
+
+    if (!valid) {
+      res.status(401).json({ error: 'Frasa akses admin tidak sesuai.' });
+      return;
+    }
+
+    const token = signSessionToken({
+      sub: 'kicchive_admin',
+      name: adminName,
+      role: 'admin',
+      exp: Date.now() + 7 * 24 * 60 * 60 * 1000,
+    });
+
+    res.json({
+      token,
+      user: { uid: 'kicchive_admin', name: adminName, role: 'admin' },
+    });
+  });
+
+  app.post('/api/member/session', (req, res) => {
+    const rawName = typeof req.body?.name === 'string' ? req.body.name.trim().slice(0, 60) : '';
+    if (rawName.length < 2) {
+      res.status(400).json({ error: 'Masukkan nama anggota minimal 2 karakter.' });
+      return;
+    }
+    const slug = rawName
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '_')
+      .replace(/^_+|_+$/g, '')
+      .slice(0, 32) || 'pembaca';
+    const uid = `member_${slug}`;
+    const token = signSessionToken({
+      sub: uid,
+      name: rawName,
+      role: 'member',
+      exp: Date.now() + 7 * 24 * 60 * 60 * 1000,
+    });
+    res.json({
+      token,
+      user: { uid, name: rawName, role: 'member' },
+    });
+  });
+
+  // ---------------------------------------------------------------
+  // Books Catalog & PDF Upload Routes
+  // ---------------------------------------------------------------
+  app.get('/api/books', (_req, res) => {
+    const sorted = [...store.books].sort((a, b) => b.createdAtMs - a.createdAtMs);
+    res.json({ books: sorted });
+  });
+
+  app.post('/api/books', async (req, res) => {
+    const caller = await resolveCaller(req.headers.authorization);
+    if (!caller || caller.role !== 'admin') {
+      res.status(403).json({ error: 'Hanya admin Kicchive yang dapat menambahkan buku.' });
+      return;
+    }
+
+    const body = req.body as Record<string, unknown>;
+    const title = typeof body.title === 'string' ? body.title.trim().slice(0, 200) : '';
+    const author = typeof body.author === 'string' ? body.author.trim().slice(0, 150) : '';
+    const category = typeof body.category === 'string' ? body.category.trim().slice(0, 60) : 'Umum';
+    const isbn = typeof body.isbn === 'string' ? body.isbn.trim().slice(0, 40) : '978-602-8912-00-0';
+    const accessionNumber =
+      typeof body.accessionNumber === 'string'
+        ? body.accessionNumber.trim().slice(0, 40)
+        : `KCV-${Date.now().toString().slice(-6)}`;
+    const synopsis = typeof body.synopsis === 'string' ? body.synopsis.trim().slice(0, 2000) : '';
+    const coverUrl = typeof body.coverUrl === 'string' ? body.coverUrl.trim().slice(0, 500) : '';
+    const pdfUrl = typeof body.pdfUrl === 'string' ? body.pdfUrl.trim().slice(0, 500) : '';
+    const fileName = typeof body.fileName === 'string' ? body.fileName.trim().slice(0, 255) : '';
+    const publishedYear = Math.max(1000, Math.min(2100, Math.round(Number(body.publishedYear || 2026))));
+    const pageCount = Math.max(1, Math.min(10000, Math.round(Number(body.pageCount || 1))));
+    const fileSizeBytes = Math.max(1, Math.round(Number(body.fileSizeBytes || 1024)));
+    const totalCopies = Math.max(1, Math.min(500, Math.round(Number(body.totalCopies || 3))));
+    const loanDurationDays = Math.max(1, Math.min(60, Math.round(Number(body.loanDurationDays || 7))));
+
+    if (!title || !author || !synopsis || !pdfUrl.startsWith('/api/pdfs/') || !isSafeCoverUrl(coverUrl)) {
+      res.status(400).json({ error: 'Data buku tidak lengkap atau URL tidak valid.' });
+      return;
+    }
+
+    const slug =
+      title
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .slice(0, 40) || 'buku';
+    const id = `kcv-${slug}-${Date.now().toString(36)}`;
+    const now = Date.now();
+
+    const newBook: StoredBook = {
+      id,
+      title,
+      author,
+      category,
+      isbn,
+      accessionNumber,
+      publishedYear,
+      pageCount,
+      synopsis,
+      coverUrl,
+      pdfUrl,
+      fileName: fileName || `${slug}.pdf`,
+      fileSizeBytes,
+      totalCopies,
+      availableCopies: totalCopies,
+      loanDurationDays,
+      createdBy: caller.uid,
+      createdAtMs: now,
+      updatedAtMs: now,
+    };
+
+    store.books.unshift(newBook);
+    saveStore(store);
+    res.status(201).json({ book: newBook });
+  });
+
+  app.patch('/api/books/:id', async (req, res) => {
+    const caller = await resolveCaller(req.headers.authorization);
+    if (!caller || caller.role !== 'admin') {
+      res.status(403).json({ error: 'Hanya admin yang dapat mengubah koleksi.' });
+      return;
+    }
+
+    const book = store.books.find((b) => b.id === req.params.id);
+    if (!book) {
+      res.status(404).json({ error: 'Buku tidak ditemukan.' });
+      return;
+    }
+
+    const nextTotal = Math.max(1, Math.min(500, Math.round(Number(req.body?.totalCopies ?? book.totalCopies))));
+    const nextDuration = Math.max(1, Math.min(60, Math.round(Number(req.body?.loanDurationDays ?? book.loanDurationDays))));
+    const borrowed = Math.max(0, book.totalCopies - book.availableCopies);
+    book.totalCopies = nextTotal;
+    book.availableCopies = Math.max(0, Math.min(nextTotal, nextTotal - borrowed));
+    book.loanDurationDays = nextDuration;
+    book.updatedAtMs = Date.now();
+    saveStore(store);
+
+    res.json({ book });
+  });
+
+  app.delete('/api/books/:id', async (req, res) => {
+    const caller = await resolveCaller(req.headers.authorization);
+    if (!caller || caller.role !== 'admin') {
+      res.status(403).json({ error: 'Hanya admin yang dapat menghapus buku.' });
+      return;
+    }
+
+    const idx = store.books.findIndex((b) => b.id === req.params.id);
+    if (idx === -1) {
+      res.status(404).json({ error: 'Buku tidak ditemukan.' });
+      return;
+    }
+    store.books.splice(idx, 1);
+    saveStore(store);
+    res.json({ ok: true });
+  });
+
   app.post('/api/uploads/pdf', upload.single('file'), async (req, res) => {
     try {
-      const authHeader = req.headers.authorization || '';
-      const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
-      if (!token) {
+      const caller = await resolveCaller(req.headers.authorization);
+      if (!caller) {
         res.status(401).json({ error: 'Token otentikasi diperlukan untuk mengunggah PDF.' });
         return;
       }
-
-      const verifiedUser = await verifyFirebaseIdToken(token);
-      if (!verifiedUser) {
-        res.status(401).json({ error: 'Sesi otentikasi tidak valid. Silakan masuk kembali.' });
-        return;
-      }
-
-      const adminAllowed = await isAuthorizedAdmin(
-        verifiedUser.uid,
-        verifiedUser.email,
-        verifiedUser.emailVerified
-      );
-      if (!adminAllowed) {
-        res.status(403).json({ error: 'Hanya admin kicchive yang dapat mengunggah berkas PDF.' });
+      if (caller.role !== 'admin') {
+        res.status(403).json({ error: 'Hanya admin Kicchive yang dapat mengunggah berkas PDF.' });
         return;
       }
 
@@ -449,14 +931,19 @@ async function startServer(): Promise<void> {
         return;
       }
 
-      const safeBase = path
-        .basename(file.originalname, '.pdf')
-        .toLowerCase()
-        .replace(/[^a-z0-9_-]+/g, '-')
-        .replace(/^-+|-+$/g, '')
-        .slice(0, 48) || 'dokumen';
+      const safeBase =
+        path
+          .basename(file.originalname, '.pdf')
+          .toLowerCase()
+          .replace(/[^a-z0-9_-]+/g, '-')
+          .replace(/^-+|-+$/g, '')
+          .slice(0, 48) || 'dokumen';
       const storedFilename = `${safeBase}-${Date.now()}.pdf`;
-      const targetPath = path.join(UPLOADS_DIR, storedFilename);
+      const targetPath = path.resolve(UPLOADS_DIR, storedFilename);
+      if (!targetPath.startsWith(UPLOADS_DIR + path.sep)) {
+        res.status(400).json({ error: 'Lokasi penyimpanan berkas tidak valid.' });
+        return;
+      }
       fs.writeFileSync(targetPath, file.buffer);
 
       res.status(201).json({
@@ -478,7 +965,11 @@ async function startServer(): Promise<void> {
       return;
     }
 
-    const filePath = path.join(UPLOADS_DIR, filename);
+    const filePath = path.resolve(UPLOADS_DIR, filename);
+    if (!filePath.startsWith(UPLOADS_DIR + path.sep)) {
+      res.status(400).json({ error: 'Jalur berkas tidak valid.' });
+      return;
+    }
     if (!fs.existsSync(filePath)) {
       res.status(404).json({ error: 'Berkas PDF tidak ditemukan.' });
       return;
@@ -487,6 +978,295 @@ async function startServer(): Promise<void> {
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `inline; filename="${filename}"`);
     res.sendFile(filePath);
+  });
+
+  // ---------------------------------------------------------------
+  // Loans & Notifications Routes (for non-Google sessions & Admin)
+  // ---------------------------------------------------------------
+  app.get('/api/loans', async (req, res) => {
+    const caller = await resolveCaller(req.headers.authorization);
+    if (!caller) {
+      res.status(401).json({ error: 'Silakan masuk terlebih dahulu.' });
+      return;
+    }
+
+    const visible =
+      caller.role === 'admin'
+        ? store.loans
+        : store.loans.filter((l) => l.userId === caller.uid);
+    const sorted = [...visible].sort((a, b) => b.borrowedAtMs - a.borrowedAtMs);
+    res.json({ loans: sorted });
+  });
+
+  app.post('/api/loans', async (req, res) => {
+    const caller = await resolveCaller(req.headers.authorization);
+    if (!caller) {
+      res.status(401).json({ error: 'Silakan masuk terlebih dahulu untuk meminjam buku.' });
+      return;
+    }
+
+    const bookId = typeof req.body?.bookId === 'string' ? req.body.bookId.trim() : '';
+    const book = store.books.find((b) => b.id === bookId);
+    if (!book) {
+      res.status(404).json({ error: 'Buku tidak ditemukan di katalog.' });
+      return;
+    }
+    if (book.availableCopies < 1) {
+      res.status(400).json({ error: 'Semua eksemplar buku ini sedang dipinjam.' });
+      return;
+    }
+
+    const alreadyBorrowed = store.loans.find(
+      (l) => l.bookId === book.id && l.userId === caller.uid && l.status === 'borrowed'
+    );
+    if (alreadyBorrowed) {
+      res.json({ loan: alreadyBorrowed });
+      return;
+    }
+
+    const now = Date.now();
+    const loan: StoredLoan = {
+      id: `loan_${crypto.randomBytes(6).toString('hex')}`,
+      bookId: book.id,
+      bookTitle: book.title,
+      bookAuthor: book.author,
+      bookCoverUrl: book.coverUrl,
+      pdfUrl: book.pdfUrl,
+      userId: caller.uid,
+      userName: caller.name,
+      userEmail: caller.email,
+      status: 'borrowed',
+      borrowedAtMs: now,
+      dueAtMs: now + book.loanDurationDays * 24 * 60 * 60 * 1000,
+      lastReadPage: 1,
+      totalPages: Math.max(1, book.pageCount),
+      overdueNotified: false,
+      updatedAtMs: now,
+    };
+
+    book.availableCopies -= 1;
+    book.updatedAtMs = now;
+    store.loans.unshift(loan);
+    saveStore(store);
+
+    res.status(201).json({ loan });
+  });
+
+  app.patch('/api/loans/:id', async (req, res) => {
+    const caller = await resolveCaller(req.headers.authorization);
+    if (!caller) {
+      res.status(401).json({ error: 'Silakan masuk terlebih dahulu.' });
+      return;
+    }
+
+    const loan = store.loans.find((l) => l.id === req.params.id);
+    if (!loan) {
+      res.status(404).json({ error: 'Data pinjaman tidak ditemukan.' });
+      return;
+    }
+    if (caller.role !== 'admin' && loan.userId !== caller.uid) {
+      res.status(403).json({ error: 'Anda tidak berwenang mengubah pinjaman ini.' });
+      return;
+    }
+
+    const action = req.body?.action;
+    const now = Date.now();
+
+    if (action === 'progress') {
+      const page = Math.max(1, Math.min(10000, Math.round(Number(req.body?.lastReadPage || 1))));
+      loan.lastReadPage = page;
+      loan.updatedAtMs = now;
+      saveStore(store);
+      res.json({ loan });
+      return;
+    }
+
+    if (action === 'return') {
+      if (loan.status === 'borrowed') {
+        loan.status = 'returned';
+        loan.returnedAtMs = now;
+        loan.updatedAtMs = now;
+        const book = store.books.find((b) => b.id === loan.bookId);
+        if (book) {
+          book.availableCopies = Math.min(book.totalCopies, book.availableCopies + 1);
+          book.updatedAtMs = now;
+        }
+        saveStore(store);
+      }
+      res.json({ loan });
+      return;
+    }
+
+    if (action === 'simulate_overdue') {
+      if (caller.role !== 'admin') {
+        res.status(403).json({ error: 'Hanya admin yang dapat mensimulasikan keterlambatan.' });
+        return;
+      }
+      loan.dueAtMs = now - 3 * 24 * 60 * 60 * 1000;
+      loan.overdueNotified = true;
+      loan.updatedAtMs = now;
+      store.notifications.unshift({
+        id: `notif_${crypto.randomBytes(6).toString('hex')}`,
+        userId: loan.userId,
+        loanId: loan.id,
+        bookId: loan.bookId,
+        bookTitle: loan.bookTitle,
+        type: 'overdue',
+        title: `Pengingat Keterlambatan: ${loan.bookTitle}`,
+        message: `Masa pinjam buku "${loan.bookTitle}" telah melewati batas pengembalian selama 3 hari. Harap segera kembalikan melalui menu Pinjaman Saya.`,
+        daysOverdue: 3,
+        isRead: false,
+        createdAtMs: now,
+        updatedAtMs: now,
+      });
+      saveStore(store);
+      res.json({ loan });
+      return;
+    }
+
+    res.status(400).json({ error: 'Aksi pinjaman tidak dikenal.' });
+  });
+
+  app.get('/api/notifications', async (req, res) => {
+    const caller = await resolveCaller(req.headers.authorization);
+    if (!caller) {
+      res.status(401).json({ error: 'Silakan masuk terlebih dahulu.' });
+      return;
+    }
+
+    // Automatically generate overdue notifications for borrower's overdue active loans
+    const now = Date.now();
+    let changed = false;
+    for (const loan of store.loans) {
+      if (
+        loan.userId === caller.uid &&
+        loan.status === 'borrowed' &&
+        !loan.overdueNotified &&
+        loan.dueAtMs < now
+      ) {
+        const daysOverdue = Math.max(1, Math.ceil((now - loan.dueAtMs) / (24 * 60 * 60 * 1000)));
+        store.notifications.unshift({
+          id: `notif_${crypto.randomBytes(6).toString('hex')}`,
+          userId: loan.userId,
+          loanId: loan.id,
+          bookId: loan.bookId,
+          bookTitle: loan.bookTitle,
+          type: 'overdue',
+          title: `Pengingat Keterlambatan: ${loan.bookTitle}`,
+          message: `Masa pinjam buku "${loan.bookTitle}" telah melewati batas pengembalian selama ${daysOverdue} hari. Harap segera kembalikan melalui menu Pinjaman Saya.`,
+          daysOverdue,
+          isRead: false,
+          createdAtMs: now,
+          updatedAtMs: now,
+        });
+        loan.overdueNotified = true;
+        loan.updatedAtMs = now;
+        changed = true;
+      }
+    }
+    if (changed) saveStore(store);
+
+    const mine = store.notifications
+      .filter((n) => n.userId === caller.uid)
+      .sort((a, b) => b.createdAtMs - a.createdAtMs);
+    res.json({ notifications: mine });
+  });
+
+  app.post('/api/notifications/remind', async (req, res) => {
+    const caller = await resolveCaller(req.headers.authorization);
+    if (!caller || caller.role !== 'admin') {
+      res.status(403).json({ error: 'Hanya admin yang dapat mengirim pengingat manual.' });
+      return;
+    }
+
+    const loanId = typeof req.body?.loanId === 'string' ? req.body.loanId.trim() : '';
+    const loan = store.loans.find((l) => l.id === loanId);
+    if (!loan) {
+      res.status(404).json({ error: 'Data pinjaman tidak ditemukan.' });
+      return;
+    }
+
+    const now = Date.now();
+    const diffMs = now - loan.dueAtMs;
+    const daysOverdue = diffMs > 0 ? Math.max(1, Math.ceil(diffMs / (24 * 60 * 60 * 1000))) : 0;
+    const isOverdue = daysOverdue > 0;
+
+    const notif: StoredNotification = {
+      id: `notif_${crypto.randomBytes(6).toString('hex')}`,
+      userId: loan.userId,
+      loanId: loan.id,
+      bookId: loan.bookId,
+      bookTitle: loan.bookTitle,
+      type: isOverdue ? 'overdue' : 'admin_reminder',
+      title: isOverdue
+        ? `Tagihan Pengembalian Terlambat (${daysOverdue} Hari)`
+        : 'Pengingat Pengembalian dari Admin Kicchive',
+      message: isOverdue
+        ? `Admin Kicchive mengingatkan bahwa buku "${loan.bookTitle}" telah terlambat dikembalikan selama ${daysOverdue} hari. Mohon segera proses pengembalian.`
+        : `Admin Kicchive mengingatkan agar buku "${loan.bookTitle}" dikembalikan sebelum tanggal jatuh tempo.`,
+      daysOverdue,
+      isRead: false,
+      createdAtMs: now,
+      updatedAtMs: now,
+    };
+
+    if (isOverdue) {
+      loan.overdueNotified = true;
+      loan.updatedAtMs = now;
+    }
+    store.notifications.unshift(notif);
+    saveStore(store);
+    res.status(201).json({ notification: notif });
+  });
+
+  app.patch('/api/notifications/:id', async (req, res) => {
+    const caller = await resolveCaller(req.headers.authorization);
+    if (!caller) {
+      res.status(401).json({ error: 'Silakan masuk terlebih dahulu.' });
+      return;
+    }
+
+    if (req.params.id === 'mark-all-read') {
+      const now = Date.now();
+      for (const n of store.notifications) {
+        if (n.userId === caller.uid && !n.isRead) {
+          n.isRead = true;
+          n.updatedAtMs = now;
+        }
+      }
+      saveStore(store);
+      res.json({ ok: true });
+      return;
+    }
+
+    const notif = store.notifications.find((n) => n.id === req.params.id);
+    if (!notif || notif.userId !== caller.uid) {
+      res.status(404).json({ error: 'Notifikasi tidak ditemukan.' });
+      return;
+    }
+    notif.isRead = true;
+    notif.updatedAtMs = Date.now();
+    saveStore(store);
+    res.json({ notification: notif });
+  });
+
+  app.delete('/api/notifications/:id', async (req, res) => {
+    const caller = await resolveCaller(req.headers.authorization);
+    if (!caller) {
+      res.status(401).json({ error: 'Silakan masuk terlebih dahulu.' });
+      return;
+    }
+
+    const idx = store.notifications.findIndex(
+      (n) => n.id === req.params.id && (n.userId === caller.uid || caller.role === 'admin')
+    );
+    if (idx === -1) {
+      res.status(404).json({ error: 'Notifikasi tidak ditemukan.' });
+      return;
+    }
+    store.notifications.splice(idx, 1);
+    saveStore(store);
+    res.json({ ok: true });
   });
 
   if (process.env.NODE_ENV !== 'production') {
@@ -504,11 +1284,11 @@ async function startServer(): Promise<void> {
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`kicchive server listening on http://0.0.0.0:${PORT}`);
+    console.log(`Kicchive server listening on http://0.0.0.0:${PORT}`);
   });
 }
 
 startServer().catch((err) => {
-  console.error('Failed to start kicchive server:', err);
+  console.error('Failed to start Kicchive server:', err);
   process.exit(1);
 });

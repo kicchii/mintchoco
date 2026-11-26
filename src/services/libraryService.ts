@@ -30,6 +30,114 @@ export function isAdminEmail(email?: string | null): boolean {
   return Boolean(email && email.toLowerCase() === BOOTSTRAPPED_ADMIN_EMAIL.toLowerCase());
 }
 
+interface ServerBookDto {
+  id: string;
+  title: string;
+  author: string;
+  category: string;
+  isbn: string;
+  accessionNumber: string;
+  publishedYear: number;
+  pageCount: number;
+  synopsis: string;
+  coverUrl: string;
+  pdfUrl: string;
+  fileName: string;
+  fileSizeBytes: number;
+  totalCopies: number;
+  availableCopies: number;
+  loanDurationDays: number;
+  createdBy: string;
+  createdAtMs: number;
+  updatedAtMs: number;
+}
+
+interface ServerLoanDto {
+  id: string;
+  bookId: string;
+  bookTitle: string;
+  bookAuthor: string;
+  bookCoverUrl: string;
+  pdfUrl: string;
+  userId: string;
+  userName: string;
+  userEmail: string;
+  status: 'borrowed' | 'returned';
+  borrowedAtMs: number;
+  dueAtMs: number;
+  returnedAtMs?: number;
+  lastReadPage: number;
+  totalPages: number;
+  overdueNotified: boolean;
+  updatedAtMs: number;
+}
+
+interface ServerNotificationDto {
+  id: string;
+  userId: string;
+  loanId: string;
+  bookId: string;
+  bookTitle: string;
+  type: 'overdue' | 'due_soon' | 'admin_reminder' | 'returned';
+  title: string;
+  message: string;
+  daysOverdue: number;
+  isRead: boolean;
+  createdAtMs: number;
+  updatedAtMs: number;
+}
+
+function mapServerBook(b: ServerBookDto): Book {
+  return {
+    ...b,
+    createdAt: Timestamp.fromMillis(b.createdAtMs),
+    updatedAt: Timestamp.fromMillis(b.updatedAtMs),
+  };
+}
+
+function mapServerLoan(l: ServerLoanDto): Loan {
+  return {
+    ...l,
+    borrowedAt: Timestamp.fromMillis(l.borrowedAtMs),
+    dueAt: Timestamp.fromMillis(l.dueAtMs),
+    returnedAt: l.returnedAtMs ? Timestamp.fromMillis(l.returnedAtMs) : undefined,
+    updatedAt: Timestamp.fromMillis(l.updatedAtMs),
+  };
+}
+
+function mapServerNotification(n: ServerNotificationDto): NotificationItem {
+  return {
+    ...n,
+    createdAt: Timestamp.fromMillis(n.createdAtMs),
+    updatedAt: Timestamp.fromMillis(n.updatedAtMs),
+  };
+}
+
+export async function fetchServerBooks(): Promise<Book[]> {
+  const res = await fetch('/api/books');
+  if (!res.ok) return [];
+  const data = (await res.json()) as { books?: ServerBookDto[] };
+  return (data.books || []).map(mapServerBook);
+}
+
+export async function fetchServerLoans(customToken: string): Promise<Loan[]> {
+  const res = await fetch('/api/loans', {
+    headers: { Authorization: `Bearer ${customToken}` },
+  });
+  if (!res.ok) return [];
+  const data = (await res.json()) as { loans?: ServerLoanDto[] };
+  return (data.loans || []).map(mapServerLoan);
+}
+
+export async function fetchServerNotifications(customToken: string): Promise<NotificationItem[]> {
+  const res = await fetch('/api/notifications', {
+    headers: { Authorization: `Bearer ${customToken}` },
+  });
+  if (!res.ok) return [];
+  const data = (await res.json()) as { notifications?: ServerNotificationDto[] };
+  return (data.notifications || []).map(mapServerNotification);
+}
+
 export async function ensureUserDocument(user: User): Promise<boolean> {
   const userRef = doc(db, 'users', user.uid);
   const isBootAdmin = isAdminEmail(user.email) && user.emailVerified;
@@ -102,12 +210,19 @@ export async function seedInitialCatalog(adminUid: string): Promise<void> {
   }
 }
 
-export async function uploadPdfFile(file: File): Promise<UploadedPdfResult> {
-  const currentUser = auth.currentUser;
-  if (!currentUser) {
-    throw new Error('Silakan masuk terlebih dahulu untuk mengunggah berkas PDF.');
+export async function uploadPdfFile(
+  file: File,
+  customToken?: string | null
+): Promise<UploadedPdfResult> {
+  let token = customToken || '';
+  if (!token) {
+    const currentUser = auth.currentUser;
+    if (!currentUser) {
+      throw new Error('Silakan masuk sebagai admin terlebih dahulu untuk mengunggah berkas PDF.');
+    }
+    token = await currentUser.getIdToken();
   }
-  const token = await currentUser.getIdToken();
+
   const formData = new FormData();
   formData.append('file', file);
 
@@ -144,12 +259,32 @@ export interface CreateBookInput {
   createdBy: string;
 }
 
-export async function createBookRecord(input: CreateBookInput): Promise<string> {
-  const slug = input.title
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 40) || 'buku';
+export async function createBookRecord(
+  input: CreateBookInput,
+  customToken?: string | null
+): Promise<string> {
+  if (customToken) {
+    const res = await fetch('/api/books', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${customToken}`,
+      },
+      body: JSON.stringify(input),
+    });
+    const data = (await res.json()) as { book?: ServerBookDto; error?: string };
+    if (!res.ok || !data.book) {
+      throw new Error(data.error || 'Gagal menambahkan buku ke katalog.');
+    }
+    return data.book.id;
+  }
+
+  const slug =
+    input.title
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 40) || 'buku';
   const bookId = `kcv-${slug}-${Date.now().toString(36)}`;
   const bookRef = doc(db, 'books', bookId);
 
@@ -184,8 +319,23 @@ export async function createBookRecord(input: CreateBookInput): Promise<string> 
 export async function updateBookCopiesAndDuration(
   book: Book,
   totalCopies: number,
-  loanDurationDays: number
+  loanDurationDays: number,
+  customToken?: string | null
 ): Promise<void> {
+  if (customToken) {
+    const res = await fetch(`/api/books/${encodeURIComponent(book.id)}`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${customToken}`,
+      },
+      body: JSON.stringify({ totalCopies, loanDurationDays }),
+    });
+    const data = (await res.json()) as { error?: string };
+    if (!res.ok) throw new Error(data.error || 'Gagal memperbarui stok buku.');
+    return;
+  }
+
   const safeTotal = Math.max(1, Math.min(500, Math.round(totalCopies)));
   const borrowedCount = Math.max(0, book.totalCopies - book.availableCopies);
   const safeAvailable = Math.max(0, Math.min(safeTotal, safeTotal - borrowedCount));
@@ -203,7 +353,20 @@ export async function updateBookCopiesAndDuration(
   }
 }
 
-export async function deleteBookRecord(bookId: string): Promise<void> {
+export async function deleteBookRecord(
+  bookId: string,
+  customToken?: string | null
+): Promise<void> {
+  if (customToken) {
+    const res = await fetch(`/api/books/${encodeURIComponent(bookId)}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${customToken}` },
+    });
+    const data = (await res.json()) as { error?: string };
+    if (!res.ok) throw new Error(data.error || 'Gagal menghapus buku.');
+    return;
+  }
+
   try {
     await deleteDoc(doc(db, 'books', bookId));
   } catch (error) {
@@ -211,7 +374,30 @@ export async function deleteBookRecord(bookId: string): Promise<void> {
   }
 }
 
-export async function borrowBookAtomic(book: Book, user: User): Promise<string> {
+export async function borrowBookAtomic(
+  book: Book,
+  user: User | null,
+  customToken?: string | null
+): Promise<string> {
+  if (customToken) {
+    const res = await fetch('/api/loans', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${customToken}`,
+      },
+      body: JSON.stringify({ bookId: book.id }),
+    });
+    const data = (await res.json()) as { loan?: ServerLoanDto; error?: string };
+    if (!res.ok || !data.loan) {
+      throw new Error(data.error || 'Gagal meminjam buku.');
+    }
+    return data.loan.id;
+  }
+
+  if (!user) {
+    throw new Error('Silakan masuk terlebih dahulu untuk meminjam buku.');
+  }
   if (book.availableCopies < 1) {
     throw new Error('Semua eksemplar buku ini sedang dipinjam.');
   }
@@ -255,7 +441,25 @@ export async function borrowBookAtomic(book: Book, user: User): Promise<string> 
   }
 }
 
-export async function returnBookAtomic(loan: Loan, book?: Book): Promise<void> {
+export async function returnBookAtomic(
+  loan: Loan,
+  book?: Book,
+  customToken?: string | null
+): Promise<void> {
+  if (customToken) {
+    const res = await fetch(`/api/loans/${encodeURIComponent(loan.id)}`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${customToken}`,
+      },
+      body: JSON.stringify({ action: 'return' }),
+    });
+    const data = (await res.json()) as { error?: string };
+    if (!res.ok) throw new Error(data.error || 'Gagal mengembalikan buku.');
+    return;
+  }
+
   const loanRef = doc(db, 'loans', loan.id);
   const bookRef = doc(db, 'books', loan.bookId);
 
@@ -281,8 +485,24 @@ export async function returnBookAtomic(loan: Loan, book?: Book): Promise<void> {
   }
 }
 
-export async function updateReadingProgress(loanId: string, page: number): Promise<void> {
+export async function updateReadingProgress(
+  loanId: string,
+  page: number,
+  customToken?: string | null
+): Promise<void> {
   const safePage = Math.max(1, Math.min(10000, Math.round(page)));
+  if (customToken) {
+    await fetch(`/api/loans/${encodeURIComponent(loanId)}`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${customToken}`,
+      },
+      body: JSON.stringify({ action: 'progress', lastReadPage: safePage }),
+    });
+    return;
+  }
+
   try {
     await updateDoc(doc(db, 'loans', loanId), {
       lastReadPage: safePage,
@@ -361,7 +581,24 @@ export async function syncOverdueNotificationsForLoans(
   }
 }
 
-export async function sendManualOverdueReminder(loan: Loan): Promise<void> {
+export async function sendManualOverdueReminder(
+  loan: Loan,
+  customToken?: string | null
+): Promise<void> {
+  if (customToken) {
+    const res = await fetch('/api/notifications/remind', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${customToken}`,
+      },
+      body: JSON.stringify({ loanId: loan.id }),
+    });
+    const data = (await res.json()) as { error?: string };
+    if (!res.ok) throw new Error(data.error || 'Gagal mengirim pengingat.');
+    return;
+  }
+
   const daysOverdue = getDaysOverdue(loan.dueAt);
   const isOverdue = daysOverdue > 0;
   const notifRef = doc(collection(db, 'notifications'));
@@ -375,11 +612,11 @@ export async function sendManualOverdueReminder(loan: Loan): Promise<void> {
     type: isOverdue ? 'overdue' : 'admin_reminder',
     title: (isOverdue
       ? `Tagihan Pengembalian Terlambat (${daysOverdue} Hari)`
-      : `Pengingat Pengembalian dari Admin kicchive`
+      : `Pengingat Pengembalian dari Admin Kicchive`
     ).slice(0, FIELD_LIMITS.NOTIF_TITLE_MAX),
     message: (isOverdue
-      ? `Admin kicchive mengingatkan bahwa buku "${loan.bookTitle}" telah terlambat dikembalikan selama ${daysOverdue} hari. Mohon segera proses pengembalian.`
-      : `Admin kicchive mengingatkan agar buku "${loan.bookTitle}" dikembalikan sebelum tanggal jatuh tempo.`
+      ? `Admin Kicchive mengingatkan bahwa buku "${loan.bookTitle}" telah terlambat dikembalikan selama ${daysOverdue} hari. Mohon segera proses pengembalian.`
+      : `Admin Kicchive mengingatkan agar buku "${loan.bookTitle}" dikembalikan sebelum tanggal jatuh tempo.`
     ).slice(0, FIELD_LIMITS.NOTIF_MSG_MAX),
     daysOverdue,
     isRead: false,
@@ -401,7 +638,24 @@ export async function sendManualOverdueReminder(loan: Loan): Promise<void> {
   }
 }
 
-export async function simulateOverdueLoanForTesting(loan: Loan): Promise<void> {
+export async function simulateOverdueLoanForTesting(
+  loan: Loan,
+  customToken?: string | null
+): Promise<void> {
+  if (customToken) {
+    const res = await fetch(`/api/loans/${encodeURIComponent(loan.id)}`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${customToken}`,
+      },
+      body: JSON.stringify({ action: 'simulate_overdue' }),
+    });
+    const data = (await res.json()) as { error?: string };
+    if (!res.ok) throw new Error(data.error || 'Gagal mensimulasikan keterlambatan.');
+    return;
+  }
+
   const threeDaysAgo = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
   try {
     await updateDoc(doc(db, 'loans', loan.id), {
@@ -414,7 +668,18 @@ export async function simulateOverdueLoanForTesting(loan: Loan): Promise<void> {
   }
 }
 
-export async function markNotificationAsRead(notificationId: string): Promise<void> {
+export async function markNotificationAsRead(
+  notificationId: string,
+  customToken?: string | null
+): Promise<void> {
+  if (customToken) {
+    await fetch(`/api/notifications/${encodeURIComponent(notificationId)}`, {
+      method: 'PATCH',
+      headers: { Authorization: `Bearer ${customToken}` },
+    });
+    return;
+  }
+
   try {
     await updateDoc(doc(db, 'notifications', notificationId), {
       isRead: true,
@@ -425,7 +690,18 @@ export async function markNotificationAsRead(notificationId: string): Promise<vo
   }
 }
 
-export async function markAllNotificationsAsRead(notifications: NotificationItem[]): Promise<void> {
+export async function markAllNotificationsAsRead(
+  notifications: NotificationItem[],
+  customToken?: string | null
+): Promise<void> {
+  if (customToken) {
+    await fetch('/api/notifications/mark-all-read', {
+      method: 'PATCH',
+      headers: { Authorization: `Bearer ${customToken}` },
+    });
+    return;
+  }
+
   const unread = notifications.filter((n) => !n.isRead);
   if (unread.length === 0) return;
 
@@ -443,7 +719,18 @@ export async function markAllNotificationsAsRead(notifications: NotificationItem
   }
 }
 
-export async function deleteNotificationItem(notificationId: string): Promise<void> {
+export async function deleteNotificationItem(
+  notificationId: string,
+  customToken?: string | null
+): Promise<void> {
+  if (customToken) {
+    await fetch(`/api/notifications/${encodeURIComponent(notificationId)}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${customToken}` },
+    });
+    return;
+  }
+
   try {
     await deleteDoc(doc(db, 'notifications', notificationId));
   } catch (error) {
